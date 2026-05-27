@@ -614,6 +614,37 @@ export function installSessionExternalHookWriteLock(params: {
   });
 }
 
+async function createSessionFileBackup(sessionFile: string): Promise<string | null> {
+  const backupPath = `${sessionFile}.prompt-bak`;
+  try {
+    await fs.copyFile(sessionFile, backupPath);
+    return backupPath;
+  } catch {
+    return null;
+  }
+}
+
+async function restoreSessionFileFromBackup(
+  sessionFile: string,
+  backupPath: string,
+): Promise<boolean> {
+  try {
+    await fs.copyFile(backupPath, sessionFile);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+async function removeSessionFileBackup(backupPath: string | null): Promise<void> {
+  if (!backupPath) return;
+  try {
+    await fs.unlink(backupPath);
+  } catch {
+    // Best-effort cleanup — ignore ENOENT and other errors
+  }
+}
+
 export type EmbeddedAttemptSessionLockController = {
   releaseForPrompt(): Promise<void>;
   refreshAfterOwnedSessionWrite(): void;
@@ -647,6 +678,7 @@ export async function createEmbeddedAttemptSessionLockController(params: {
   let fenceGeneration = 0;
   let fenceActive = false;
   let takeoverDetected = false;
+  let backupPath: string | null = null;
   const sessionFileFenceKey = resolveSessionFileFenceKey(params.lockOptions.sessionFile);
 
   async function acquireWriteLock(): Promise<{ lock: SessionLock; owned: boolean }> {
@@ -702,6 +734,17 @@ export async function createEmbeddedAttemptSessionLockController(params: {
       return;
     }
 
+    if (backupPath) {
+      const restored = await restoreSessionFileFromBackup(params.lockOptions.sessionFile, backupPath);
+      if (restored) {
+        const restoredFingerprint = await readSessionFileFingerprint(params.lockOptions.sessionFile);
+        fenceFingerprint = restoredFingerprint;
+        fenceSnapshot = await readSessionFileFenceSnapshot(params.lockOptions.sessionFile);
+        fenceGeneration = trustSessionFileState(sessionFileFenceKey, restoredFingerprint) ?? fenceGeneration;
+        return;
+      }
+    }
+
     takeoverDetected = true;
     throw new EmbeddedAttemptSessionTakeoverError(params.lockOptions.sessionFile);
   }
@@ -755,6 +798,7 @@ export async function createEmbeddedAttemptSessionLockController(params: {
       }
       const lock = heldLock;
       heldLock = undefined;
+      backupPath = await createSessionFileBackup(params.lockOptions.sessionFile);
       const fingerprint = await readSessionFileFingerprint(params.lockOptions.sessionFile);
       const ownedWrite = ownedSessionFileWrites.get(sessionFileFenceKey);
       const trustedGeneration = trustSessionFileState(sessionFileFenceKey, fingerprint);
@@ -781,6 +825,8 @@ export async function createEmbeddedAttemptSessionLockController(params: {
       try {
         heldLock = lock;
         await assertSessionFileFence();
+        await removeSessionFileBackup(backupPath);
+        backupPath = null;
       } catch (err) {
         heldLock = undefined;
         await lock.release();
@@ -874,6 +920,8 @@ export async function createEmbeddedAttemptSessionLockController(params: {
       }
       const lock = heldLock;
       heldLock = undefined;
+      await removeSessionFileBackup(backupPath);
+      backupPath = null;
       await lock.release();
     },
   };
