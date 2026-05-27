@@ -615,7 +615,7 @@ export function installSessionExternalHookWriteLock(params: {
 }
 
 async function createSessionFileBackup(sessionFile: string): Promise<string | null> {
-  const backupPath = `${sessionFile}.prompt-bak`;
+  const backupPath = `${sessionFile}.prompt-bak-${Math.random().toString(36).slice(2)}`;
   try {
     await fs.copyFile(sessionFile, backupPath);
     return backupPath;
@@ -736,13 +736,36 @@ export async function createEmbeddedAttemptSessionLockController(params: {
     }
 
     if (backupPath) {
-      const restored = await restoreSessionFileFromBackup(params.lockOptions.sessionFile, backupPath);
-      if (restored) {
-        const restoredFingerprint = await readSessionFileFingerprint(params.lockOptions.sessionFile);
-        fenceFingerprint = restoredFingerprint;
-        fenceSnapshot = await readSessionFileFenceSnapshot(params.lockOptions.sessionFile);
-        fenceGeneration = trustSessionFileState(sessionFileFenceKey, restoredFingerprint) ?? fenceGeneration;
-        return;
+      const currentText = await fs.readFile(params.lockOptions.sessionFile, "utf8").catch(() => null);
+      if (currentText !== null) {
+        let isCorrupt = false;
+        try {
+          const lines = currentText.split(/\r?\n/);
+          for (const line of lines) {
+            if (line.trim().length > 0) JSON.parse(line);
+          }
+        } catch {
+          isCorrupt = true;
+        }
+
+        if (isCorrupt) {
+          const restored = await restoreSessionFileFromBackup(params.lockOptions.sessionFile, backupPath);
+          if (restored) {
+            const restoredFingerprint = await readSessionFileFingerprint(params.lockOptions.sessionFile);
+            fenceFingerprint = restoredFingerprint;
+            fenceSnapshot = await readSessionFileFenceSnapshot(params.lockOptions.sessionFile);
+            fenceGeneration = trustSessionFileState(sessionFileFenceKey, restoredFingerprint) ?? fenceGeneration;
+            return;
+          }
+        } else {
+          const backupText = await fs.readFile(backupPath, "utf8").catch(() => null);
+          if (backupText !== null && currentText === backupText) {
+            fenceFingerprint = current;
+            fenceSnapshot = { fingerprint: current, text: currentText };
+            fenceGeneration = trustSessionFileState(sessionFileFenceKey, current) ?? fenceGeneration;
+            return;
+          }
+        }
       }
     }
 
